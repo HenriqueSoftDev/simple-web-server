@@ -3,7 +3,6 @@ package br.senac.tads.dsw;
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.text.MessageFormat;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -11,12 +10,6 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/**
- * Exemplo obtido em https://www.baeldung.com/java-serversocket-simple-http-server
- * Alterado com apoio do Github Copilot para tratamento do request body
- *
- * @author fernando.tsuda
- */
 public class SimpleWebServer {
 
 	private final int port;
@@ -27,35 +20,36 @@ public class SimpleWebServer {
 	}
 
 	public void start() throws IOException {
-
-//		// PARA JAVA 21+ - usa virtual threads
-//		ExecutorService threadPool = Executors.newVirtualThreadPerTaskExecutor();
-
 		ExecutorService threadPool = Executors.newFixedThreadPool(THREAD_POOL_SIZE);
 		try (ServerSocket serverSocket = new ServerSocket(port)) {
-			System.out.println("Server started na porta " +  port);
+			System.out.println("Server started na porta " + port);
 			while (true) {
 				Socket clientSocket = serverSocket.accept();
-				threadPool.execute(() -> handleClient(clientSocket));
+				threadPool.execute(() -> {
+					try {
+						handleClient(clientSocket);
+					} catch (IOException e) {
+						throw new RuntimeException(e);
+					}
+				});
 			}
 		}
 	}
 
-	private void handleClient(Socket clientSocket) {
+	private void handleClient(Socket clientSocket) throws IOException {
 		try (BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-				BufferedWriter out = new BufferedWriter(new OutputStreamWriter(clientSocket.getOutputStream()))) {
+			 BufferedWriter out = new BufferedWriter(new OutputStreamWriter(clientSocket.getOutputStream()))) {
 
 			String requestLine = "";
 			StringBuilder requestHeaders = new StringBuilder();
-			boolean collectinRequestLine = true;
+			boolean collectingRequestLine = true;
 
-			// OBTENDO CABECALHOS DA REQUEST MESSAGE DO HTTP
 			int contentLength = 0;
 			String requestInputLine;
 			while ((requestInputLine = in.readLine()) != null) {
-				if (collectinRequestLine) {
+				if (collectingRequestLine) {
 					requestLine = requestInputLine;
-					collectinRequestLine = false;
+					collectingRequestLine = false;
 					continue;
 				}
 				if (requestInputLine.isEmpty()) {
@@ -68,7 +62,6 @@ public class SimpleWebServer {
 			}
 			String header = requestHeaders.toString();
 
-			// OBTENDO CORPO DA REQUEST MESSAGE, BASEADO NO TAMANHO (CONTENT-LENGTH)
 			String body = "";
 			if (contentLength > 0) {
 				char[] bodyChars = new char[contentLength];
@@ -76,54 +69,80 @@ public class SimpleWebServer {
 				body = new String(bodyChars);
 			}
 
-			// RECONSTROI A REQUEST MESSAGE (PARA DEBUG/DIDATICO)
-			String requestMessage = requestLine + "\r\n" + header + "\r\n" + body;
-			System.out.println(requestMessage);
+			// Extrai o caminho da URL (não usado para decidir tipo de resposta)
+			String path = "/";
+			if (!requestLine.isEmpty()) {
+				String[] parts = requestLine.split(" ");
+				if (parts.length >= 2) {
+					path = parts[1];
+				}
+			}
 
-			// PROCESSAMENTO - GERAR CORPO DA RESPONSE
-			String bodyOutTemplate = """
-				<!doctype html>
-				<html>
-					<head>
-						<meta charset="UTF-8">
-						<title>TADS DSW</title>
+			// Extrai Content-Type do header (se existir)
+			String contentTypeHeader = "";
+			for (String line : header.split("\r\n")) {
+				if (line.toLowerCase().startsWith("content-type:")) {
+					contentTypeHeader = line.split(":")[1].trim().toLowerCase();
+					break;
+				}
+			}
 
-					</head>
-					<body>
-						<h1>Exemplo Servidor Web Java</h1>
-						<p>Teste alteração</p>
-						<hr>
-						<h2>Mensagem Request</h2>
-						<pre>{0}</pre>
-						<hr>
-					</body>
-				</html>
-				""";
-			String responseBody = MessageFormat.format(bodyOutTemplate.replace("'", "''"), requestMessage).trim();
+			// Dados padrão
+			String nome = "Henrique";
+			String email = "henrisilva2003@gmail.com";
 
-			DateTimeFormatter formatter = DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss Z", Locale.ENGLISH);
+			// Se tiver body JSON, tenta extrair nome e email
+			if (body != null && body.contains("{")) {
+				String[] pares = body.replace("{", "").replace("}", "").replace("\"", "").split(",");
+				for (String par : pares) {
+					String[] chaveValor = par.split(":");
+					if (chaveValor.length == 2) {
+						if (chaveValor[0].trim().equalsIgnoreCase("nome")) {
+							nome = chaveValor[1].trim();
+						} else if (chaveValor[0].trim().equalsIgnoreCase("email")) {
+							email = chaveValor[1].trim();
+						}
+					}
+				}
+			}
+
+			GeradorResposta gerador;
+			String contentType;
+
+			// Decide gerador e content-type baseado no header Content-Type da requisição
+			if ("application/json".equals(contentTypeHeader)) {
+				gerador = new GeradorRespostaJson();
+				contentType = "application/json";
+			} else {
+				gerador = new GeradorRespostaHtml();
+				contentType = "text/html";
+			}
+
+			String responseBody = gerador.gerarResposta(nome, email);
+
 			ZonedDateTime now = ZonedDateTime.now(ZoneOffset.UTC);
+			DateTimeFormatter formatter = DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss Z", Locale.ENGLISH);
 
-			int length = responseBody.length();
+			int length = responseBody.getBytes().length;
 
-			// GERA RESPONSE LINE + CABECALHOS DA RESPONSE
+			// Envia resposta HTTP
 			out.write("HTTP/1.1 200 OK\r\n");
 			out.write("Date: " + formatter.format(now) + "\r\n");
 			out.write("Server: Custom Server\r\n");
-			out.write("Content-Type: text/html\r\n");
+			out.write("Content-Type: " + contentType + "\r\n");
 			out.write("Content-Length: " + length + "\r\n");
 			out.write("\r\n");
-
-			// ADICIONA CORPO NA RESPONSE
 			out.write(responseBody);
+			out.flush();
+
 		} catch (IOException ex) {
-			System.err.println("Error handling client " + ex.getMessage());
+			System.err.println("Erro ao lidar com cliente: " + ex.getMessage());
 		} finally {
 			if (clientSocket != null) {
 				try {
 					clientSocket.close();
 				} catch (IOException ex) {
-					System.err.println("Error handling client " + ex.getMessage());
+					System.err.println("Erro ao fechar conexão: " + ex.getMessage());
 				}
 			}
 		}
